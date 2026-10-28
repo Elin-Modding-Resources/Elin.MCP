@@ -1,6 +1,6 @@
 # Elin MCP setup
 
-> Sets up an AI coding agent for modding the game Elin. There are three parts, and you set them up together.
+> Sets up an AI coding agent for modding the game Elin. It has three parts.
 > A local decompile of the installed game in `~/Elin-Decompiled` is the first place to look up game code.
 > `elin` is a remote MCP server with the modding wiki, game ids, sheet columns and an online index of the
 > game's source. `elin-runtime` is a local MCP server that comes with the Elin Runtime MCP mod. It evaluates
@@ -23,66 +23,79 @@ is `skills/elin-modding/setup.md` in <https://github.com/Elin-Modding-Resources/
 Only tools you can call count. If a config entry exists but you do not see its tools, the entry is stale or
 broken. Fix it instead of adding a second one.
 
-You cannot add a server to the session you are running in. Steps 3 to 5 edit configuration that takes effect
-when the client restarts (step 7).
+You cannot add a server to the session you are running in. The client picks up steps 3, 5 and 6 when it
+restarts (step 7).
 
 ## 1. Find the game
 
 `<game>` is the folder that holds `Elin_Data/` and `version.json`. Look in these places, in order:
 
 1. The `ElinGamePath` environment variable. Script mod projects use it too.
-2. `C:\Program Files (x86)\Steam\steamapps\common\Elin`.
+2. `C:\Program Files (x86)\Steam\steamapps\common\Elin`, or `~/.steam/steam/steamapps/common/Elin` on Linux.
 3. `steamapps/common/Elin` under each `"path"` listed in `<Steam>/steamapps/libraryfolders.vdf`. `<Steam>` is
-   the `SteamPath` value in the registry key `HKCU\Software\Valve\Steam`.
+   the `SteamPath` value in the registry key `HKCU\Software\Valve\Steam`, or `~/.steam/steam` on Linux.
 4. If none of these exists, ask the user.
 
 ## 2. Decompile the game
 
-The `elin-modding` skill looks up game code here first, because this copy matches the installed version
-exactly. It needs the .NET 10 SDK, which C# script mods need too. Check with `dotnet --list-sdks`; on
+This needs the .NET 10 SDK, which C# script mods need too. Check with `dotnet --list-sdks`; on
 Windows, install it with `winget install Microsoft.DotNet.SDK.10`. Then install `ilspycmd` 10 or newer with
 `dotnet tool install --global ilspycmd`, or `update` instead of `install` for an older copy.
 
 If you cannot install them, tell the user and go on with step 3. The skill then uses the knowledge server's
 online index.
 
-The script decompiles the 14 assemblies that the online index covers into `~/Elin-Decompiled/<assembly>/`, one
-file per type. It stores the SHA-256 of `Elin.dll` in `Elin.dll.sha256` and does nothing while the game is
-unchanged, so run it again after every game update. A full run takes under a minute.
+The script decompiles the 14 assemblies that the online index covers into `~/Elin-Decompiled/<assembly>/`.
+It builds into `~/Elin-Decompiled.new` and swaps that in only when every assembly succeeded. It records the
+game folder in `game-path` and the SHA-256 of `Elin.dll` in `Elin.dll.sha256`, does nothing while the game is
+unchanged, and refuses to replace an `~/Elin-Decompiled` it did not create. Run it again after every game
+update. A full run takes under a minute.
 
 ```pwsh
 $Game = '<game>'   # from step 1
 $Out = "$HOME\Elin-Decompiled"
 $M = "$Game\Elin_Data\Managed"; $Kit = "$Game\Package\_ModdingKit"; $Core = "$Game\BepInEx\core"
+$env:PATH += ";$HOME\.dotnet\tools"
+if (!(Test-Path "$M\Elin.dll")) { throw "no Elin.dll under $Game" }
 $Hash = (Get-FileHash "$M\Elin.dll").Hash.ToLower()
 if ((Get-Content "$Out\Elin.dll.sha256" -ErrorAction Ignore) -eq $Hash) { 'up to date'; return }
+if ((Test-Path $Out) -and !(Test-Path "$Out\Elin.dll.sha256")) { throw "$Out was not made by this script; move it away first" }
+Remove-Item "$Out.new" -Recurse -Force -ErrorAction Ignore
 foreach ($a in 'Elin','Plugins.BaseCore','Plugins.UI','Plugins.Modding','Plugins.Scripting','Plugins.Util','Plugins.Calc',
                'Plugins.Sound','Plugins.ActorSystem','Plugins.NameGen','Plugins.NoiseSystem','Plugins.Tween','ClassLibrary2','ElinModdingKit') {
     $Dll = if ($a -eq 'ElinModdingKit') { "$Kit\$a.dll" } else { "$M\$a.dll" }
-    Remove-Item "$Out\$a" -Recurse -Force -ErrorAction Ignore
-    ilspycmd -p -o "$Out\$a" -r $M -r $Kit -r $Core -lv CSharp14_0 --disable-updatecheck $Dll
+    ilspycmd -p -o "$Out.new\$a" -r $M -r $Kit -r $Core -lv CSharp14_0 --disable-updatecheck $Dll
     if ($LASTEXITCODE) { throw "ilspycmd failed on $a" }
 }
-Set-Content "$Out\Elin.dll.sha256" $Hash -NoNewline
+Set-Content "$Out.new\Elin.dll.sha256" $Hash -NoNewline
+Set-Content "$Out.new\game-path" $Game -NoNewline
+Remove-Item $Out -Recurse -Force -ErrorAction Ignore
+Move-Item "$Out.new" $Out
 "decompiled to $Out"
 ```
 
 ```bash
+(
+set -e
 GAME="<game>"   # from step 1
 OUT=~/Elin-Decompiled
 M="$GAME/Elin_Data/Managed"; KIT="$GAME/Package/_ModdingKit"; CORE="$GAME/BepInEx/core"
+export PATH="$PATH:$HOME/.dotnet/tools"
+[ -f "$M/Elin.dll" ] || { echo "no Elin.dll under $GAME"; exit 1; }
 HASH=$(sha256sum < "$M/Elin.dll" | cut -d' ' -f1)
-if [ "$(cat "$OUT/Elin.dll.sha256" 2>/dev/null)" = "$HASH" ]; then echo "up to date"; else (
-  set -e
-  for a in Elin Plugins.BaseCore Plugins.UI Plugins.Modding Plugins.Scripting Plugins.Util Plugins.Calc \
-           Plugins.Sound Plugins.ActorSystem Plugins.NameGen Plugins.NoiseSystem Plugins.Tween ClassLibrary2 ElinModdingKit; do
-    dll="$M/$a.dll"; [ "$a" != ElinModdingKit ] || dll="$KIT/$a.dll"
-    rm -rf "$OUT/$a"
-    ilspycmd -p -o "$OUT/$a" -r "$M" -r "$KIT" -r "$CORE" -lv CSharp14_0 --disable-updatecheck "$dll"
-  done
-  echo "$HASH" > "$OUT/Elin.dll.sha256"
-  echo "decompiled to $OUT"
-) fi
+[ "$(cat "$OUT/Elin.dll.sha256" 2>/dev/null)" != "$HASH" ] || { echo "up to date"; exit 0; }
+[ ! -e "$OUT" ] || [ -f "$OUT/Elin.dll.sha256" ] || { echo "$OUT was not made by this script; move it away first"; exit 1; }
+rm -rf "$OUT.new"
+for a in Elin Plugins.BaseCore Plugins.UI Plugins.Modding Plugins.Scripting Plugins.Util Plugins.Calc \
+         Plugins.Sound Plugins.ActorSystem Plugins.NameGen Plugins.NoiseSystem Plugins.Tween ClassLibrary2 ElinModdingKit; do
+  dll="$M/$a.dll"; [ "$a" != ElinModdingKit ] || dll="$KIT/$a.dll"
+  ilspycmd -p -o "$OUT.new/$a" -r "$M" -r "$KIT" -r "$CORE" -lv CSharp14_0 --disable-updatecheck "$dll"
+done
+echo "$HASH" > "$OUT.new/Elin.dll.sha256"
+echo "$GAME" > "$OUT.new/game-path"
+rm -rf "$OUT"; mv "$OUT.new" "$OUT"
+echo "decompiled to $OUT"
+)
 ```
 
 `-r` lists the folders that references resolve from. The modding kit references Roslyn in its own folder and
@@ -228,7 +241,7 @@ step 4.
 
 | Symptom | Cause and fix |
 |---|---|
-| `ilspycmd` is not found right after installing it | The .NET tools folder (`~/.dotnet/tools`) is not on PATH yet. Open a new terminal, or add the folder to PATH. |
+| `dotnet` is not found right after installing the SDK | The shell still has the old PATH. Call it by full path, `C:\Program Files\dotnet\dotnet.exe` on Windows. |
 | No `elin-runtime` tools after a restart | `node` is not on the client's PATH. This happens to GUI clients started from the desktop. Put the absolute path of `node` in `command`. Running `node "<mod>/bridge/elin-mcp.mjs" --help` in a terminal shows whether the bridge itself starts. |
 | `elin_instances` finds nothing while the game runs | The game started before the mod was installed, the mod is off in the mod list, or `Enabled = false` is set under `[Listener]`. When the listener is up, the game log says `listening on 127.0.0.1:<port>`. |
 | Every instance shows `BUSY` when the game window loses focus | The game's "run in background" option is off. |
